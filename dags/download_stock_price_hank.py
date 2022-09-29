@@ -47,6 +47,7 @@ from airflow.operators.python import PythonOperator
 from airflow.utils.dates import days_ago
 from airflow.models import Variable
 from airflow.providers.mysql.operators.mysql import MySqlOperator
+from airflow.operators.email import EmailOperator
 
 # [END import_module]
 
@@ -118,6 +119,8 @@ def download_prices(**context):
         # with open(f'/Users/hanklee/airflow/logs/{ticker}.csv', 'w') as writer:
         #     hist.to_csv(writer, index=True)
         print("Finished downloading price data for " + ticker)
+    valid_tickers = ["IBM", "GE", "AAPL", "MSFT"]
+    return valid_tickers
 
 
 def get_tickers(context):
@@ -161,7 +164,9 @@ def load_price_data_hank(ticker):
 
 
 def save_to_mysql_stage(*args, **context):
-    tickers = get_tickers(context)
+    # tickers = get_tickers(context)
+    # 'ti' 是 task instance 的縮寫，所以就照寫就好
+    tickers = context['ti'].xcom_pull(task_ids='download_prices')
 
     # 用明文來連接
     # engine = create_engine(
@@ -171,6 +176,7 @@ def save_to_mysql_stage(*args, **context):
     # 用 connector 來連接(帳密等資訊都存在 airflow webserver, 見最下面)
     from airflow.hooks.base_hook import BaseHook
     db_info = BaseHook.get_connection('demodb')
+    # 這邊開始，就是在 Admin/Connections 下，設定 demodb 時，所一一對應的 login, password, host, port, schema
     username = db_info.login
     password = db_info.password
     host = db_info.host
@@ -221,10 +227,10 @@ with DAG(
     default_args={
         'depends_on_past': False,
         'email': ['ckshoupon@hotmail.com'],
-        'email_on_failure': False,
-        'email_on_retry': False,
+        'email_on_failure': True,
+        'email_on_retry': True,
         'retries': 1,
-        'retry_delay': timedelta(minutes=5),
+        'retry_delay': timedelta(seconds=30),  # minutes=5
         # 'queue': 'bash_queue',
         # 'pool': 'backfill',
         # 'priority_weight': 10,
@@ -240,10 +246,11 @@ with DAG(
     },
     # [END default_args]
     description='A simple tutorial DAG',
-    schedule_interval=timedelta(days=1),
+    schedule_interval='5 5 * * *',  # 每天的 5:05 要執行 # timedelta(days=1)
     start_date=pendulum.today('local').add(days=-2),
     dagrun_timeout=timedelta(minutes=60),
-    catchup=False,
+    catchup=False,  # 假如有幾次 dag 的 schedule 錯過了，要不要回去補跑？
+    max_active_runs=1,  # 重要, 尤其有和 DB 連動時。設成 1，那
     tags=['hankdata'],
 ) as dag:
     # [END instantiate_dag]
@@ -262,10 +269,17 @@ with DAG(
     mysql_task = MySqlOperator(
         task_id='merge_stock_price',
         mysql_conn_id='demodb',
-        sql='merge_stock_price.sql',
+        sql='merge_stock_price.sql',  # 這邊可以寫 sql 語句
         dag=dag,
     )
-    download_task >> save_to_mysql_task >> mysql_task
+    email_task = EmailOperator(
+        task_id='send_email',
+        to='ckshoupon@hotmail.com',
+        subject='Stock Price is downloaded - {{ds}}',
+        html_content=""" <h3>Email Test</h3> {{ ds_nodash }}<br/>{{ dag }}<br/>{{ conf }}<br/>{{ next_ds }}<br/>{{ yesterday_ds }}<br/>{{ tomorrow_ds }}<br/>{{ execution_date }}<br/>""",
+        dag=dag
+    )
+    download_task >> save_to_mysql_task >> mysql_task >> email_task
 
 
 # [END tutorial]
@@ -273,9 +287,83 @@ with DAG(
 
 # 在 Admin/Variable 裡面，新增
 # stock_list = IBM GE MSFT AAPL
-# stock_list_json = ["IBM", "GE", "AAPL", "MSFT"]
+# stock_list_json = ["IBM", "GE", "AAPL", "MSFT", "FB"]
+# 之後，在 python 的 function 中，可用 Variable.get() 來取得
+# stock_list = Variable.get("stock_list_json", deserialize_json=True)
 
-# tirger with config 裡面，新增 {"stocks":["FB"]}
+
+# triger 時，可以臨時加參數進去，使用時機是你突然想做個實驗，去 overwrite 原本的做法
+# 那方法就是，按下 tirger with config 裡面，新增 {"stocks":["FB"]}
+# 然後，在 python 的 function 中，可以這樣取得結果：
+# stocks = context["dag_run"].conf.get("stocks", None) if (
+#         "dag_run" in context and context["dag_run"] is not None) else None
+
+# 在 UI 的 Admin/Connections 可以選 MySQL，
+# 然後 connection id 可以自己隨便寫，例如 airflow_db
+# connection type 選 MySQL
+# Host 選 127.0.0.1
+# Schema 就是 database 的意思，所以選 demodb
+# login 和 password 就寫進去
+
+
+# XComs的用法: XComs 是 Cross Communication 的縮寫
+# 最簡單的，就是上一個 task 是 python operator 時，那個 python function 可以 return 東西
+# 例如 return 一個 valid_tickers 的 list
+# 那他的下家，可以用 tickers = context['ti'].xcom_pull(task_ids="上家id")，來取得他 return 的結果
+
+# 講了
+
+# mail 設定，在 airflow.cfg 的裡面，改這一段
+# [smtp]
+
+# # If you want airflow to send emails on retries, failure, and you want to use
+# # the airflow.utils.email.send_email_smtp function, you have to configure an
+# # smtp server here
+# smtp_host = smtp.gmail.com
+# smtp_starttls = False
+# smtp_ssl = True
+# # Example: smtp_user = airflow
+# smtp_user = ckshoupon@gmail.com
+# # Example: smtp_password = airflow
+# smtp_password = 12345678
+# smtp_port = 465 # 465 對應 smtp_ssl = True, 587 對應 smtp_starttls = True
+# smtp_mail_from = airflow@example.com
+# smtp_timeout = 30
+# smtp_retry_limit = 5
+
+
+# Macro 是 存系統變數的地方
+# 去 Macros reference 的地方看
+# {{ ds }} 為 execution date
+
+# BashOperator 可以這樣寫
+# my_command = """
+#     python xxx.py {{params.my_param}}
+# """
+# start = BashOperator(
+#     task_id = 'start',
+#     bash_command = start_command,
+#     params = {'my_param': 'hahaha'}
+# )
+
+# PythonOperator 可以這樣寫
+# crawl_page = PythonOperator(
+#     task_id = 'crawl_page',
+#     python_callable=crawl_page_links,
+#     op_args=['car', "{{ds}}", "{{dag.default_args['start_date_str']}}"],
+#     provide_context=True
+# )
+# def crawl_page_links(forum, current_date, start_date_str):
+#     print("whatever~~")
 
 # pip install -U 'apache-airflow[mysql]'
 # pip install -U apache-airflow-providers-mysql
+
+# 帳號 admin
+# 密碼 FQC9B5GwEkV57mDU
+# echo “export AIRFLOW_HOME=~/airflow” >> ~/.bashrc
+
+# shut down
+# ps aux | grep airflow-webserver
+# 找到 master [airflow-webserver] 對應的 pid (e.g. 30632)，kill掉他
+# kill -9 30632
