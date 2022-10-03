@@ -125,4 +125,5 @@ with DAG(
         html_content=""" <h3>Email Test</h3> {{ ds_nodash }}<br/>{{ dag }}<br/>{{ conf }}<br/>{{ next_ds }}<br/>{{ yesterday_ds }}<br/>{{ tomorrow_ds }}<br/>{{ execution_date }}<br/>""",
         dag=dag
     )
+    
     download_task >> save_to_mysql_task >> mysql_task >> email_task
